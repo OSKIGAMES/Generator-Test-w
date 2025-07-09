@@ -1,0 +1,807 @@
+import React, { useState, useEffect } from 'react';
+
+// Main App Component
+const App = () => {
+    // State for test configuration inputs
+    const [testConfig, setTestConfig] = useState({
+        testName: '',
+        topic: '',
+        classLevel: 'Klasa 1', // Default class level
+        teacherName: '', // Teacher's name input
+        timeToSolve: '45 minut', // New: Time to solve input
+        numQuestions: 5,
+        difficulty: 'Średni', // Default to Medium
+        numVersions: 1,
+        questionTypes: {
+            'Wielokrotny wybór': true,
+            'Jednokrotny wybór': false,
+            'Zadanie z tabelą Prawda/Fałsz': false,
+            'Otwarte': false,
+        },
+    });
+
+    // State for generated tests (array of test versions)
+    const [generatedTests, setGeneratedTests] = useState([]);
+    // Loading state for AI generation
+    const [isLoading, setIsLoading] = useState(false);
+    // Error message state
+    const [error, setError] = useState('');
+    // State to control which test version is currently displayed
+    const [selectedVersionIndex, setSelectedVersionIndex] = useState(0);
+
+    // Function to handle changes in form inputs
+    const handleChange = (e) => {
+        const { name, value, type, checked } = e.target;
+        if (type === 'checkbox') {
+            setTestConfig(prevConfig => ({
+                ...prevConfig,
+                questionTypes: {
+                    ...prevConfig.questionTypes,
+                    [name]: checked,
+                },
+            }));
+        } else {
+            setTestConfig(prevConfig => ({
+                ...prevConfig,
+                [name]: value,
+            }));
+        }
+    };
+
+    // Function to generate the test using the Gemini API
+    const handleGenerateTest = async () => {
+        setError(''); // Clear previous errors
+        setIsLoading(true); // Set loading state to true
+        setGeneratedTests([]); // Clear previous tests
+
+        const selectedTypes = Object.keys(testConfig.questionTypes).filter(type => testConfig.questionTypes[type]);
+        if (selectedTypes.length === 0) {
+            setError('Proszę wybrać co najmniej jeden typ pytania.');
+            setIsLoading(false);
+            return;
+        }
+        if (!testConfig.topic.trim()) {
+            setError('Proszę podać temat sprawdzianu/kartkówki.');
+            setIsLoading(false);
+            return;
+        }
+
+        // Construct the prompt for the AI
+        const prompt = `
+            Wygeneruj ${testConfig.numVersions} wersji sprawdzianu/kartkówki dla ${testConfig.classLevel}.
+            Nazwa sprawdzianu/kartkówki: "${testConfig.testName || 'Sprawdzian/Kartkówka'}"
+            Temat: "${testConfig.topic}"
+            Liczba zadań na wersję: ${testConfig.numQuestions}
+            Poziom trudności: ${testConfig.difficulty}
+            Typy zadań do uwzględnienia: ${selectedTypes.join(', ')}.
+
+            Dla każdego zadania podaj:
+            - id (numer zadania)
+            - type (typ zadania: "Wielokrotny wybór", "Jednokrotny wybór", "Zadanie z tabelą Prawda/Fałsz", "Otwarte")
+            - question (treść pytania)
+            - options (tablica stringów, tylko dla pytań wielokrotnego/jednokrotnego wyboru. Może być pusta [] jeśli nie dotyczy)
+            - statements (tablica obiektów, tylko dla "Zadanie z tabelą Prawda/Fałsz". Każdy obiekt powinien mieć "text" i "correctAnswer" ("Prawda" lub "Fałsz"). Może być pusta [] jeśli nie dotyczy)
+            - correctAnswer (tablica stringów. Dla pytań z jedną odpowiedzią (np. jednokrotny wybór, otwarte) zawiera jeden element. Może być pusta [] jeśli nie dotyczy i odpowiedź jest w 'statements'.)
+            - gradingPoints (liczba punktów za zadanie)
+
+            Szczegółowe instrukcje dla typów zadań:
+            - "Wielokrotny wybór": Pytanie z wieloma poprawnymi odpowiedziami. Podaj 'options' i 'correctAnswer' jako tablicę wszystkich poprawnych opcji.
+            - "Jednokrotny wybór": Pytanie z jedną poprawną odpowiedzią. Podaj 'options' i 'correctAnswer' jako tablicę z jednym poprawnym elementem.
+            - "Zadanie z tabelą Prawda/Fałsz": Pytanie wprowadzające do tabeli. 'statements' to tablica obiektów, gdzie każdy obiekt ma "text" (treść zdania) i "correctAnswer" ("Prawda" lub "Fałsz"). 'options' i 'correctAnswer' na poziomie pytania są puste [].
+            - "Otwarte": Pytanie, na które odpowiedź jest dłuższym tekstem. 'correctAnswer' to tablica z przykładową poprawną odpowiedzią.
+
+            Upewnij się, że poprawna odpowiedź dla pytań wielokrotnego/jednokrotnego wyboru jest jedną z podanych opcji.
+            Zadbaj o różnorodność pytań i ich zgodność z tematem i poziomem klasy.
+            Odpowiedź sformatuj jako tablicę obiektów JSON, gdzie każdy obiekt reprezentuje wersję sprawdzianu.
+            Przykład struktury JSON dla "Zadanie z tabelą Prawda/Fałsz":
+            {
+              "id": 4,
+              "type": "Zadanie z tabelą Prawda/Fałsz",
+              "question": "Oceń prawdziwość poniższych zdań:",
+              "options": [],
+              "statements": [
+                {"text": "Ziemia jest płaska.", "correctAnswer": "Fałsz"},
+                {"text": "Woda wrze w 100 stopniach Celsjusza.", "correctAnswer": "Prawda"}
+              ],
+              "correctAnswer": [],
+              "gradingPoints": 1
+            }
+            Pamiętaj, aby wszystkie pola (options, statements, correctAnswer) były zawsze obecne, nawet jeśli są puste tablice.
+        `;
+
+        try {
+            let chatHistory = [];
+            chatHistory.push({ role: "user", parts: [{ text: prompt }] });
+            const payload = {
+                contents: chatHistory,
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "ARRAY",
+                        items: {
+                            type: "OBJECT",
+                            properties: {
+                                "versionName": { "type": "STRING" },
+                                "questions": {
+                                    "type": "ARRAY",
+                                    "items": {
+                                        "type": "OBJECT",
+                                        "properties": {
+                                            "id": { "type": "NUMBER" },
+                                            "type": { "type": "STRING" },
+                                            "question": { "type": "STRING" },
+                                            "options": {
+                                                "type": "ARRAY",
+                                                "items": { "type": "STRING" }
+                                            },
+                                            "statements": { // New property for True/False table
+                                                "type": "ARRAY",
+                                                "items": {
+                                                    "type": "OBJECT",
+                                                    "properties": {
+                                                        "text": { "type": "STRING" },
+                                                        "correctAnswer": { "type": "STRING" } // "Prawda" or "Fałsz"
+                                                    },
+                                                    "required": ["text", "correctAnswer"]
+                                                }
+                                            },
+                                            "correctAnswer": { // Now always an array of strings
+                                                "type": "ARRAY",
+                                                "items": { "type": "STRING" }
+                                            },
+                                            "gradingPoints": { "type": "NUMBER" }
+                                        },
+                                        "required": ["id", "type", "question", "gradingPoints", "options", "statements", "correctAnswer"]
+                                    }
+                                }
+                            },
+                            "required": ["versionName", "questions"]
+                        }
+                    }
+                }
+            };
+
+            const apiKey = ""; // Canvas will provide this
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(`Błąd API: ${response.status} ${response.statusText} - ${errorData.error.message || 'Nieznany błąd'}`);
+            }
+
+            const result = await response.json();
+
+            if (result.candidates && result.candidates.length > 0 &&
+                result.candidates[0].content && result.candidates[0].content.parts &&
+                result.candidates[0].content.parts.length > 0) {
+                let jsonString = result.candidates[0].content.parts[0].text;
+                console.log("Surowa odpowiedź AI (przed czyszczeniem):", jsonString); // Log raw response for debugging
+
+                let cleanedJsonString = '';
+                // Attempt to find the outermost JSON array or object using regex
+                // This regex looks for a string starting with '[' and ending with ']' OR starting with '{' and ending with '}'
+                // The 's' flag allows '.' to match newline characters.
+                const jsonMatch = jsonString.match(/\[[\s\S]*\]|\{[\s\S]*\}/);
+
+                if (jsonMatch && jsonMatch[0]) {
+                    cleanedJsonString = jsonMatch[0];
+                } else {
+                    // Fallback if no clear JSON structure found by regex, try stripping common markdown wrappers
+                    cleanedJsonString = jsonString.replace(/^\s*```(?:json)?\s*|```\s*$/g, '').trim();
+                    console.warn("Nie znaleziono wyraźnej struktury JSON. Próbuję usunąć znaczniki markdown.");
+                }
+
+                // Final trim after all cleaning attempts
+                cleanedJsonString = cleanedJsonString.trim();
+
+                console.log("Odpowiedź AI (po czyszczeniu):", cleanedJsonString); // Log cleaned response for debugging
+
+                let parsedJson;
+                try {
+                    parsedJson = JSON.parse(cleanedJsonString);
+                } catch (parseError) {
+                    console.error("Błąd parsowania JSON:", parseError);
+                    setError(`Błąd parsowania odpowiedzi AI. Otrzymano nieprawidłowy format JSON. Spróbuj ponownie. Szczegóły: ${parseError.message}. Sprawdź konsolę, aby zobaczyć surową odpowiedź i oczyszczony ciąg.`);
+                    setIsLoading(false);
+                    return;
+                }
+
+                // Basic validation of the parsed structure
+                if (!Array.isArray(parsedJson) || parsedJson.length === 0) {
+                    setError('Wygenerowana struktura JSON jest pusta lub nie jest tablicą. Spróbuj ponownie.');
+                    setIsLoading(false);
+                    return;
+                }
+
+                // Post-processing: Filter out question types not selected by the user
+                const filteredTests = parsedJson.map(version => {
+                    const filteredQuestions = version.questions.filter(q => selectedTypes.includes(q.type));
+                    return { ...version, questions: filteredQuestions };
+                });
+
+                setGeneratedTests(filteredTests);
+                setSelectedVersionIndex(0); // Select the first version by default
+            } else {
+                setError('Nie udało się wygenerować sprawdzianu. Spróbuj ponownie. Odpowiedź AI była pusta lub niekompletna.');
+            }
+        } catch (err) {
+            console.error("Błąd podczas generowania sprawdzianu:", err);
+            setError(`Wystąpił błąd: ${err.message}. Spróbuj ponownie z innym tematem lub konfiguracją.`);
+        } finally {
+            setIsLoading(false); // End loading
+        }
+    };
+
+    // Function to handle printing only the test
+    const handlePrintTestOnly = (versionData) => {
+        const printWindow = window.open('', '_blank');
+        if (!printWindow) {
+            setError('Wyskakujące okienka są zablokowane. Proszę je włączyć, aby wydrukować.');
+            return;
+        }
+
+        let htmlContent = `
+            <!DOCTYPE html>
+            <html lang="pl">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>${testConfig.testName || 'Sprawdzian/Kartkówka'} - ${versionData.versionName}</title>
+                <link href="https://unpkg.com/tailwindcss@^2/dist/tailwind.min.css" rel="stylesheet">
+                <style>
+                    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+                    body {
+                        font-family: 'Inter', sans-serif;
+                        color: #333;
+                        margin: 0;
+                        padding: 20px;
+                        background-color: #f9fafb;
+                    }
+                    .container {
+                        max-width: 800px;
+                        margin: 0 auto;
+                        background-color: #fff;
+                        padding: 30px;
+                        border-radius: 12px;
+                        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                    }
+                    .header-grid {
+                        display: grid;
+                        grid-template-columns: 1fr auto; /* Left content, right content */
+                        align-items: end;
+                        margin-bottom: 20px;
+                    }
+                    .header-left {
+                        text-align: center; /* Centered for test name */
+                        grid-column: 1 / -1; /* Span full width */
+                    }
+                    .header-right {
+                        text-align: right;
+                        font-size: 0.8em;
+                        color: #6b7280;
+                        grid-column: 2; /* Align to right */
+                        margin-top: -10px; /* Adjust vertical position */
+                    }
+                    h1 {
+                        font-size: 2.25rem; /* text-4xl */
+                        font-weight: 700;
+                        color: #1a202c;
+                        margin-bottom: 0.25rem;
+                        text-align: center; /* Ensure h1 is centered */
+                    }
+                    h2 {
+                        font-size: 1.25rem; /* Smaller than h1, adjust as needed */
+                        font-weight: 600;
+                        color: #4a5568;
+                        margin-top: 0;
+                        text-align: center; /* Ensure h2 is centered */
+                    }
+                    .question-item {
+                        margin-bottom: 20px;
+                        padding-bottom: 15px;
+                        border-bottom: 1px dashed #e2e8f0;
+                    }
+                    .question-item:last-child {
+                        border-bottom: none;
+                    }
+                    .options-list {
+                        list-style: none;
+                        padding-left: 0;
+                        margin-top: 10px;
+                    }
+                    .options-list li {
+                        margin-bottom: 5px;
+                    }
+                    .info-box {
+                        border: 1px solid #cbd5e0; /* Gray border */
+                        border-radius: 8px;
+                        padding: 15px;
+                        margin-bottom: 30px;
+                    }
+                    .footer-text {
+                        text-align: center;
+                        margin-top: 40px;
+                        font-size: 0.9em;
+                        color: #6b7280;
+                    }
+                    .fill-in-the-blank-line {
+                        display: inline-block;
+                        border-bottom: 1px solid #94a3b8;
+                        min-width: 80px; /* Adjust as needed */
+                        margin: 0 5px;
+                    }
+                    .true-false-table {
+                        width: 100%;
+                        border-collapse: collapse;
+                        margin-top: 10px;
+                    }
+                    .true-false-table th, .true-false-table td {
+                        border: 1px solid #cbd5e0;
+                        padding: 8px;
+                        text-align: left;
+                    }
+                    .true-false-table th {
+                        background-color: #f1f5f9;
+                        font-weight: 600;
+                    }
+                    .question-heading {
+                        font-size: 1.25em;
+                        font-weight: 600;
+                        margin-bottom: 10px;
+                        color: #333;
+                    }
+                    @media print {
+                        body {
+                            background-color: #fff;
+                            padding: 0;
+                        }
+                        .container {
+                            box-shadow: none;
+                            border-radius: 0;
+                            padding: 0;
+                        }
+                        button {
+                            display: none;
+                        }
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header-grid">
+                        <div class="header-left">
+                            <h1>${testConfig.testName || 'Sprawdzian'}</h1>
+                            <h2>Temat: ${testConfig.topic} / Czas: ${testConfig.timeToSolve}</h2>
+                        </div>
+                        <div class="header-right">
+                            <p>${testConfig.teacherName || 'Nauczyciel'}</p>
+                        </div>
+                    </div>
+
+                    <div class="info-box">
+                        <p class="text-lg font-semibold mb-2">Imię i nazwisko:</p>
+                        <p class="text-lg font-semibold mb-2">Klasa: ${testConfig.classLevel}</p>
+                        <p class="text-lg font-semibold">Data:</p>
+                    </div>
+
+                    ${versionData.questions.map(q => `
+                        <div class="question-item">
+                            <p class="text-lg font-medium mb-2"><strong>${q.id}.</strong> ${q.question}</p>
+                            ${(q.type === 'Wielokrotny wybór' || q.type === 'Jednokrotny wybór') && q.options && q.options.length > 0 ? `
+                                <ul class="options-list">
+                                    ${q.options.map((option, idx) => `<li>${String.fromCharCode(65 + idx)}. ${option}</li>`).join('')}
+                                </ul>
+                            ` : ''}
+                            ${q.type === 'Otwarte' ? `<div class="border-b border-gray-300 h-16 w-full mt-4"></div>` : ''}
+                            ${q.type === 'Zadanie z tabelą Prawda/Fałsz' && q.statements && q.statements.length > 0 ? `
+                                <table class="true-false-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Lp.</th>
+                                            <th>Zdanie</th>
+                                            <th>P/F</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${q.statements.map((s, idx) => `
+                                            <tr>
+                                                <td>${idx + 1}.</td>
+                                                <td>${s.text}</td>
+                                                <td></td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            ` : ''}
+                        </div>
+                    `).join('')}
+
+                    <p class="footer-text">Wygenerowano poprzez Generator Testów i Kartkówek firmy O5K4R_ dnia: ${new Date().toLocaleDateString('pl-PL')} o godzinie: ${new Date().toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' })}</p>
+                </div>
+            </body>
+            </html>
+        `;
+
+        printWindow.document.write(htmlContent);
+        printWindow.document.close();
+        printWindow.focus();
+        printWindow.onload = () => {
+            printWindow.print();
+        };
+    };
+
+    // Function to handle printing only the answer key
+    const handlePrintAnswerKey = (versionData) => {
+        const printWindow = window.open('', '_blank');
+        if (!printWindow) {
+            setError('Wyskakujące okienka są zablokowane. Proszę je włączyć, aby wydrukować.');
+            return;
+        }
+
+        let htmlContent = `
+            <!DOCTYPE html>
+            <html lang="pl">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Karta Odpowiedzi - ${testConfig.testName || 'Sprawdzian/Kartkówka'} - ${versionData.versionName}</title>
+                <link href="https://unpkg.com/tailwindcss@^2/dist/tailwind.min.css" rel="stylesheet">
+                <style>
+                    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+                    body {
+                        font-family: 'Inter', sans-serif;
+                        color: #333;
+                        margin: 0;
+                        padding: 20px;
+                        background-color: #f9fafb;
+                    }
+                    .container {
+                        max-width: 800px;
+                        margin: 0 auto;
+                        background-color: #fff;
+                        padding: 30px;
+                        border-radius: 12px;
+                        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                    }
+                    h1, h2, h3 {
+                        color: #1a202c;
+                        font-weight: 700;
+                    }
+                    .answer-key-section {
+                        margin-top: 20px;
+                        padding-top: 20px;
+                    }
+                    .answer-item {
+                        margin-bottom: 15px;
+                        padding-bottom: 10px;
+                        border-bottom: 1px dotted #cbd5e0;
+                    }
+                    .answer-item:last-child {
+                        border-bottom: none;
+                    }
+                    .footer-text {
+                        text-align: center;
+                        margin-top: 40px;
+                        font-size: 0.9em;
+                        color: #6b7280;
+                    }
+                    @media print {
+                        body {
+                            background-color: #fff;
+                            padding: 0;
+                        }
+                        .container {
+                            box-shadow: none;
+                            border-radius: 0;
+                            padding: 0;
+                        }
+                        button {
+                            display: none;
+                        }
+                    }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1 class="text-3xl text-center mb-6">Karta Odpowiedzi</h1>
+                    <h2 class="text-xl text-center mb-8">${testConfig.testName || 'Sprawdzian/Kartkówka'} - ${versionData.versionName}</h2>
+
+                    <div class="answer-key-section">
+                        <h3 class="text-2xl text-center mb-6">System Oceniania</h3>
+                        ${versionData.questions.map(q => `
+                            <div class="answer-item">
+                                <p class="text-lg font-medium mb-1"><strong>${q.id}.</strong> Typ: ${q.type}</p>
+                                ${q.type === 'Zadanie z tabelą Prawda/Fałsz' && q.statements && q.statements.length > 0 ? `
+                                    <p class="text-md mb-1"><strong>Poprawne odpowiedzi:</strong></p>
+                                    <ul class="list-disc pl-5">
+                                        ${q.statements.map((s, idx) => `<li>${idx + 1}. ${s.text} - ${s.correctAnswer}</li>`).join('')}
+                                    </ul>
+                                ` : `
+                                    <p class="text-md mb-1"><strong>Poprawna odpowiedź:</strong> ${q.correctAnswer ? q.correctAnswer.join(', ') : 'N/A'}</p>
+                                `}
+                                <p class="text-md"><strong>Punkty:</strong> ${q.gradingPoints}</p>
+                            </div>
+                        `).join('')}
+                        <p class="text-lg font-semibold mt-4">Łączna liczba punktów: ${versionData.questions.reduce((sum, q) => sum + q.gradingPoints, 0)}</p>
+                    </div>
+                    <p class="footer-text">Wygenerowano poprzez Generator Testów i Kartkówek firmy O5K4R_ dnia: ${new Date().toLocaleDateString('pl-PL')} o godzinie: ${new Date().toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' })}</p>
+                </div>
+            </body>
+            </html>
+        `;
+
+        printWindow.document.write(htmlContent);
+        printWindow.document.close();
+        printWindow.focus();
+        printWindow.onload = () => {
+            printWindow.print();
+        };
+    };
+
+
+    return (
+        <div className="min-h-screen bg-gray-100 p-4 sm:p-8 flex items-center justify-center font-inter">
+            <div className="bg-white p-6 sm:p-10 rounded-xl shadow-2xl w-full max-w-4xl">
+                <h1 className="text-3xl sm:text-4xl font-extrabold text-center text-gray-800 mb-8">
+                    <span role="img" aria-label="Generator ikon">✨</span> Generator Sprawdzianów i Kartkówek
+                </h1>
+
+                {/* Test Configuration Form */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                    <div className="flex flex-col">
+                        <label htmlFor="testName" className="text-gray-700 font-semibold mb-2">Nazwa sprawdzianu/kartkówki:</label>
+                        <input
+                            type="text"
+                            id="testName"
+                            name="testName"
+                            value={testConfig.testName}
+                            onChange={handleChange}
+                            placeholder="Np. Sprawdzian z Historii"
+                            className="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                    </div>
+
+                    <div className="flex flex-col">
+                        <label htmlFor="topic" className="text-gray-700 font-semibold mb-2">Temat sprawdzianu:</label>
+                        <input
+                            type="text"
+                            id="topic"
+                            name="topic"
+                            value={testConfig.topic}
+                            onChange={handleChange}
+                            placeholder="Np. II Wojna Światowa"
+                            className="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                    </div>
+
+                    <div className="flex flex-col">
+                        <label htmlFor="classLevel" className="text-gray-700 font-semibold mb-2">Klasa:</label>
+                        <select
+                            id="classLevel"
+                            name="classLevel"
+                            value={testConfig.classLevel}
+                            onChange={handleChange}
+                            className="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                        >
+                            {Array.from({ length: 8 }, (_, i) => `Klasa ${i + 1}`).map(cls => (
+                                <option key={cls} value={cls}>{cls}</option>
+                            ))}
+                        </select>
+                    </div>
+
+                    <div className="flex flex-col">
+                        <label htmlFor="teacherName" className="text-gray-700 font-semibold mb-2">Imię i nazwisko nauczyciela:</label>
+                        <input
+                            type="text"
+                            id="teacherName"
+                            name="teacherName"
+                            value={testConfig.teacherName}
+                            onChange={handleChange}
+                            placeholder="Np. Jan Kowalski"
+                            className="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                    </div>
+
+                    <div className="flex flex-col">
+                        <label htmlFor="timeToSolve" className="text-gray-700 font-semibold mb-2">Czas na rozwiązanie:</label>
+                        <input
+                            type="text"
+                            id="timeToSolve"
+                            name="timeToSolve"
+                            value={testConfig.timeToSolve}
+                            onChange={handleChange}
+                            placeholder="Np. 45 minut"
+                            className="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                    </div>
+
+                    <div className="flex flex-col">
+                        <label htmlFor="numQuestions" className="text-gray-700 font-semibold mb-2">Liczba zadań:</label>
+                        <input
+                            type="number"
+                            id="numQuestions"
+                            name="numQuestions"
+                            value={testConfig.numQuestions}
+                            onChange={handleChange}
+                            min="1"
+                            max="20"
+                            className="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                    </div>
+
+                    <div className="flex flex-col">
+                        <label htmlFor="difficulty" className="text-gray-700 font-semibold mb-2">Poziom trudności:</label>
+                        <select
+                            id="difficulty"
+                            name="difficulty"
+                            value={testConfig.difficulty}
+                            onChange={handleChange}
+                            className="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                        >
+                            <option value="Łatwy">Łatwy</option>
+                            <option value="Średni">Średni</option>
+                            <option value="Trudny">Trudny</option>
+                        </select>
+                    </div>
+
+                    <div className="flex flex-col">
+                        <label htmlFor="numVersions" className="text-gray-700 font-semibold mb-2">Liczba wersji:</label>
+                        <select
+                            id="numVersions"
+                            name="numVersions"
+                            value={testConfig.numVersions}
+                            onChange={handleChange}
+                            className="p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                        >
+                            {[1, 2, 3, 4].map(num => (
+                                <option key={num} value={num}>{num}</option>
+                            ))}
+                        </select>
+                    </div>
+
+                    <div className="flex flex-col md:col-span-2"> {/* Span two columns for better layout */}
+                        <label className="text-gray-700 font-semibold mb-2">Typy zadań:</label>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                            {Object.keys(testConfig.questionTypes).map(type => (
+                                <label key={type} className="inline-flex items-center cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        name={type}
+                                        checked={testConfig.questionTypes[type]}
+                                        onChange={handleChange}
+                                        className="form-checkbox h-5 w-5 text-blue-600 rounded-md"
+                                    />
+                                    <span className="ml-2 text-gray-700">{type}</span>
+                                </label>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Generate Button */}
+                <button
+                    onClick={handleGenerateTest}
+                    disabled={isLoading}
+                    className="w-full bg-blue-600 text-white font-bold py-3 px-6 rounded-lg shadow-md hover:bg-blue-700 transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    {isLoading ? (
+                        <div className="flex items-center justify-center">
+                            <svg className="animate-spin h-5 w-5 mr-3 text-white" viewBox="0 0 24 24">
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                            Generowanie...
+                        </div>
+                    ) : (
+                        'Generuj Sprawdzian/Kartkówkę'
+                    )}
+                </button>
+
+                {/* Error Message Display */}
+                {error && (
+                    <div className="mt-6 p-4 bg-red-100 border border-red-400 text-red-700 rounded-lg text-center">
+                        {error}
+                    </div>
+                )}
+
+                {/* Generated Tests Display */}
+                {generatedTests.length > 0 && (
+                    <div className="mt-10">
+                        <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center">Wygenerowane Sprawdziany/Kartkówki</h2>
+
+                        {/* Version Selector Tabs */}
+                        <div className="flex justify-center mb-6 border-b border-gray-200">
+                            {generatedTests.map((test, index) => (
+                                <button
+                                    key={index}
+                                    onClick={() => setSelectedVersionIndex(index)}
+                                    className={`py-3 px-6 text-lg font-medium transition duration-300 ease-in-out rounded-t-lg
+                                        ${selectedVersionIndex === index
+                                            ? 'border-b-4 border-blue-600 text-blue-600'
+                                            : 'text-gray-600 hover:text-blue-500 hover:border-blue-300'
+                                        }`}
+                                >
+                                    {test.versionName}
+                                </button>
+                            ))}
+                        </div>
+
+                        {/* Display Selected Test Version */}
+                        {generatedTests[selectedVersionIndex] && (
+                            <div className="bg-gray-50 p-6 rounded-lg shadow-inner">
+                                <h3 className="text-xl font-semibold text-gray-800 mb-4">
+                                    ${generatedTests[selectedVersionIndex].versionName}
+                                </h3>
+                                <div className="space-y-6">
+                                    {generatedTests[selectedVersionIndex].questions.map(question => (
+                                        <div key={question.id} className="p-4 bg-white rounded-lg shadow">
+                                            <p className="text-lg font-medium mb-2">
+                                                <strong>${question.id}.</strong> ${question.question}
+                                            </p>
+                                            {(question.type === 'Wielokrotny wybór' || question.type === 'Jednokrotny wybór') && question.options && question.options.length > 0 ? (
+                                                <ul className="list-none pl-0 mt-3 space-y-2">
+                                                    {question.options.map((option, idx) => (
+                                                        <li key={idx} className="text-gray-700">
+                                                            ${String.fromCharCode(65 + idx)}. ${option}
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            ) : ''}
+                                            {question.type === 'Otwarte' ? (
+                                                <div className="border-b border-gray-300 h-12 w-full mt-4"></div>
+                                            ) : ''}
+                                            {question.type === 'Zadanie z tabelą Prawda/Fałsz' && question.statements && question.statements.length > 0 ? (
+                                                <table className="true-false-table">
+                                                    <thead>
+                                                        <tr>
+                                                            <th>Lp.</th>
+                                                            <th>Zdanie</th>
+                                                            <th>P/F</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {question.statements.map((s, idx) => (
+                                                            <tr key={idx}>
+                                                                <td>{idx + 1}.</td>
+                                                                <td>{s.text}</td>
+                                                                <td></td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            ) : ''}
+                                        </div>
+                                    ))}
+                                </div>
+
+                                {/* Print Buttons */}
+                                <div className="mt-8 flex flex-col sm:flex-row justify-center gap-4">
+                                    <button
+                                        onClick={() => handlePrintTestOnly(generatedTests[selectedVersionIndex])}
+                                        className="bg-green-600 text-white font-bold py-3 px-6 rounded-lg shadow-md hover:bg-green-700 transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2"
+                                    >
+                                        Drukuj Sprawdzian (${generatedTests[selectedVersionIndex].versionName})
+                                    </button>
+                                    <button
+                                        onClick={() => handlePrintAnswerKey(generatedTests[selectedVersionIndex])}
+                                        className="bg-purple-600 text-white font-bold py-3 px-6 rounded-lg shadow-md hover:bg-purple-700 transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2"
+                                    >
+                                        Drukuj Kartę Odpowiedzi
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+export default App;
